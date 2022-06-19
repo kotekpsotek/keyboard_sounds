@@ -5,21 +5,27 @@ use clap::{ Command, Arg };
 use soloud::*;
 use serde::{ Serialize, Deserialize };
 use serde_json;
+use device_query::{ DeviceState, DeviceQuery, Keycode };
 
 const FOLDER_WITH_SONGS: &str = "./songs";
 const BINDINGS_FILE_LOCALISATION: &str = "./bindings/bindings.json";
 
 #[allow(dead_code)]
-fn soloud_play_song() {
+fn soloud_play_song(path_to_file: Option<&Path>) {
     // Import soloud engine bindings for Rustlang
+    // TODO: If some song is already plaing then stop this song and play new
 
     let mut sl = Soloud::default().unwrap();
 
     // Load file to play into soloud engine
     let mut wav = audio::Wav::default();
-    let path_to_file = Path::new("./songs/test_file.mp3");
-
-    wav.load(path_to_file).unwrap();
+    match path_to_file {
+        Some(path) => {
+            wav.load(path).unwrap();
+        },
+        None => wav.load(Path::new("songs/test_file.mp3")).unwrap()
+    };
+    
 
     // Call play sound
     sl.play(&wav);
@@ -34,9 +40,62 @@ fn soloud_play_song() {
 }
 
 
+struct App;
+impl App {
+    fn run_app() {
+        // Run application in conviniently way by call this assigned function
+        let device_state = DeviceState::new();
+        loop {
+            // Get only one pressed key
+            let pressed_keys = device_state.get_keys() as Vec<Keycode>;
+            let determine_one_pressed_key = if pressed_keys.len() > 0 {
+                pressed_keys[0].to_string()
+            } else {
+                String::new()
+            };
+
+            // Get Binding object for clicked key and play song from this object or do nothing when None is recived
+            let get_stored_binding_or_none = BindingsSuite::check_exists_return_data(determine_one_pressed_key);
+            match get_stored_binding_or_none {
+                Some(binding_obj) => {
+                    binding_obj.play_song_for_binding();
+                },
+                None => ()
+            };
+        };
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct BindingsSuite {
     bindings: Vec<Binding>
+}
+
+impl BindingsSuite {
+    // Get all bindings from file by using one method for this pourpose
+    fn file_get_all_bindings() -> Self {
+        let path_to_bindings = Path::new(BINDINGS_FILE_LOCALISATION);
+
+        // Error messages
+        let couldnt_format_file_with_bindings = format!("File with bindings has got incorrect format!!!");
+        let couldnt_read_bindings_file = "Couldn't read content file with bindings!";
+
+        // Get All bindings from file
+        let file_with_bindings_content = fs::read_to_string(path_to_bindings).expect(couldnt_read_bindings_file);
+        let all_bindings_object = serde_json::from_str::<BindingsSuite>(&file_with_bindings_content).expect(&couldnt_format_file_with_bindings);
+
+        // Return all bindings getted from file if exists or struct with empty bindings set
+        all_bindings_object
+    }
+
+    // Return Binding object nested in "Option" enum which store keyboard key which has been tailored to "key_name" param or return "None"
+    fn check_exists_return_data(key_name: String) -> Option<Binding> {
+        // Get all bindings from file and return first binding object which key "key" store the same key as "key_name" added in function param
+        let all_bindings = Self::file_get_all_bindings().bindings;
+        let get_specific_binding = all_bindings.iter().find(|binding| binding.key.to_lowercase() == key_name.to_lowercase())?.to_owned();
+
+        Some(get_specific_binding)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -50,13 +109,8 @@ impl Binding {
         // Get Struct with prior saved bindings or with empty bindings set
         let path_to_bindings = Path::new(BINDINGS_FILE_LOCALISATION);
         let mut all_bindings_format = if path_to_bindings.exists() {
-            // Error messages
-            let couldnt_format_file_with_bindings = format!("File with bindings has got incorrect format!!!");
-            let couldnt_read_bindings_file = "Couldn't read content file with bindings!";
-            
-            // Get All bindings from file
-            let file_with_bindings_content = fs::read_to_string(path_to_bindings).expect(couldnt_read_bindings_file);
-            let mut all_bindings_object = serde_json::from_str::<BindingsSuite>(&file_with_bindings_content).expect(&couldnt_format_file_with_bindings);
+            // Get all bindings from file
+            let mut all_bindings_object = BindingsSuite::file_get_all_bindings();
 
             // When any binding is on binding file then remove only one binding which is equal to new setting binding (only when the same binding has been found) in purpose to replace old key binding to new binding (only one will be replacing because .position() iterator method gets only first match and stop iteration over remaining elements)
             if all_bindings_object.bindings.len() > 0 {
@@ -84,7 +138,23 @@ impl Binding {
 
         // Allways return true when error is not found
         true
-    } 
+    }
+
+    // Play song this is endpoint of "Binding" struct life
+    fn play_song_for_binding(self) {
+        let song_file = self.song_name;
+
+        // Check whether song exists and play it
+        let path_to_song = Path::new(FOLDER_WITH_SONGS).join(&song_file);
+
+        if path_to_song.exists() {
+            let path_with_song = path_to_song.as_path();
+            soloud_play_song(Some(path_with_song));
+        }
+        else {
+            eprintln!(r#"Coludn't play this song "{song}" because this song doesn't exists in {library}"#, song = song_file, library = FOLDER_WITH_SONGS.split("/").collect::<Vec<&str>>()[1]);
+        };
+    }
 }
 
 fn main() {
@@ -104,12 +174,17 @@ fn main() {
                     .help("required for add play song efect for setted binding. Path to file can be relative or absolute")
                     .takes_value(true)
                     .required(true),
-            ]))
+            ])
+        )
+        .subcommand(
+            Command::new("run")
+                .about("This command run the application and this is equavilent to inicjalize raw file")
+        )
         .get_matches();
     
-    // TODO: Add function to save keyboard key binding with assinged song name (this function is already implemented in "Binding" methods struct)
     // Handle specific subcommands commands
     if let Some(subcommand_data) = app.subcommand_matches("add-binding") {
+        // Handle Command to add new song bindings
         // All arguments are required so additional check isn't required
         let keyboard_key_arg = subcommand_data.value_of("keyboard key letter").unwrap();
         let song_localisation_arg = subcommand_data.value_of("song file localisation").unwrap();
@@ -136,16 +211,24 @@ fn main() {
         else {
             println!("Added localisation to song file is incorrect!!!")
         };
+    }
+    else if let Some(_subcommand_data) = app.subcommand_matches("run") {
+        // Run application after call "run" command
+        App::run_app();
+    }
+    else {
+        // Run aplication when no-one command/args has been recived from cli
+        App::run_app();
     };
 }
 
 #[cfg(test)]
 mod test {
-    use crate::{ soloud_play_song, Binding };
+    use crate::{ soloud_play_song, Binding, BindingsSuite };
 
     #[test]
     fn play_song_basic() {
-        soloud_play_song()
+        soloud_play_song(None)
     }
 
     #[test]
@@ -161,5 +244,11 @@ mod test {
         if save_action {
             println!("Success all bindings has been save in binding file!!!");
         }
+    }
+
+    #[test]
+    fn get_specific_binding() {
+        let binding = BindingsSuite::check_exists_return_data("test".to_string()).expect("Couldn't get this binding!!!");
+        println!("Binding object: {:#?}", binding);
     }
 }

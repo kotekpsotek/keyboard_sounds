@@ -10,3 +10,4 @@ soloud = "1.0.2"
 clap = "3.2.5"
 serde = { version = "1.0.137", features = ["derive"] }
 serde_json = "1.0.81"
+device_query = "1.1.1"
