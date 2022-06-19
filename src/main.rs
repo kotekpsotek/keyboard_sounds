@@ -46,7 +46,6 @@ struct Binding {
 }
 
 impl Binding {
-    // TODO: Add function to replace existsing keyboard key song binding to new key song binding when struct with all bindings obtained from binding file is not empty
     fn save(&self) -> bool {
         // Get Struct with prior saved bindings or with empty bindings set
         let path_to_bindings = Path::new(BINDINGS_FILE_LOCALISATION);
@@ -57,7 +56,15 @@ impl Binding {
             
             // Get All bindings from file
             let file_with_bindings_content = fs::read_to_string(path_to_bindings).expect(couldnt_read_bindings_file);
-            let all_bindings_object = serde_json::from_str::<BindingsSuite>(&file_with_bindings_content).expect(&couldnt_format_file_with_bindings);
+            let mut all_bindings_object = serde_json::from_str::<BindingsSuite>(&file_with_bindings_content).expect(&couldnt_format_file_with_bindings);
+
+            // When any binding is on binding file then remove only one binding which is equal to new setting binding (only when the same binding has been found) in purpose to replace old key binding to new binding (only one will be replacing because .position() iterator method gets only first match and stop iteration over remaining elements)
+            if all_bindings_object.bindings.len() > 0 {
+                let search_same_binding = all_bindings_object.bindings.iter().position(|binding_from_file| binding_from_file.key == self.key);
+                if let Some(index) = search_same_binding {
+                    all_bindings_object.bindings.remove(index);
+                }
+            }
 
             // Return bindings instance
             all_bindings_object
@@ -115,7 +122,12 @@ fn main() {
             // Copy file content to new file with the same name and same format
             let file_name = song_localisation.file_name().unwrap().to_str().unwrap();
             match fs::copy(song_localisation, format!("./songs/{}", file_name)) {
-                Ok(_) => println!("Keyboard binding has been save. Use this commnad again to with same <keyboard key letter> argument to change binding song!!!"),
+                Ok(_) => {
+                    // Action save binding into file with bindings
+                    let new_binding_instance = Binding { key: keyboard_key.to_string(), song_name: file_name.to_string() };
+                    new_binding_instance.save();
+                    println!("Keyboard binding has been save. Use this commnad again to with same <keyboard key letter> argument to change binding song!!!")
+                },
                 Err(_) => {
                     println!(r##"Couldn't create new file {} in folder "{}" which contains all bindings songs"##, file_name, FOLDER_WITH_SONGS)
                 }
