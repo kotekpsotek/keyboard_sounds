@@ -1,44 +1,80 @@
 use std::path::Path;
-use std::time::Instant;
+use std::time::{ Instant, Duration };
 use std::fs;
 use clap::{ Command, Arg };
 use soloud::*;
 use serde::{ Serialize, Deserialize };
 use serde_json;
 use device_query::{ DeviceState, DeviceQuery, Keycode };
+use std::thread::{ spawn, sleep };
 
 const FOLDER_WITH_SONGS: &str = "./songs";
 const BINDINGS_FILE_LOCALISATION: &str = "./bindings/bindings.json";
+const SONG_STATE_FILE: &str = "./state.txt";
+const CHECK_SONG_PLAYING_STATE_DELAY_MS: u64 = 100;
 
 #[allow(dead_code)]
-fn soloud_play_song(path_to_file: Option<&Path>) {
-    // Import soloud engine bindings for Rustlang
-    // TODO: If some song is already plaing then stop this song and play new
+fn soloud_play_song(path_to_file: Option<&Path>, song_file: String) {
+    // This function use Soloud engine bindings for Rustlang. Soloud is C++ sound engine for games
+    // Error which occurred description: Error occured when already song is playing and inicjalization of new song playing is called (this is feebly description of Soloud C++ sound engine error in bindings to)
+    sleep(Duration::from_millis(100)); // Delay for give time for Song State system to apply appropriate changes (this causes that you don't get errors when you spam same key with hight frequency) FIXME: this depends on your device speed (cpu, disk read/save speed etc... for file system actions (in this case save/delete/read files)) change if you have a little bit worst machine
 
-    let mut sl = Soloud::default().unwrap();
+    // Create new instance of Soloud only when prior has been removed using RAII (Rust ownership system) because loop blocking I/O loop and in below and more speciffiically in "while" loop placed below is implemented system to stop playing song for give "place" to play new song across break blocking loop (loop which block program I/O loop)
+    // Short conclusion: one instance Soloud per device in one time else you can get errors while program working
+    if SongState::get_state() == 1 {
+        let sl = Soloud::default().unwrap();
 
-    // Load file to play into soloud engine
-    let mut wav = audio::Wav::default();
-    match path_to_file {
-        Some(path) => {
-            wav.load(path).unwrap();
-        },
-        None => wav.load(Path::new("songs/test_file.mp3")).unwrap()
-    };
+        // Load file to play into soloud engine
+        let mut wav = audio::Wav::default();
+
+        fn play_default_song_pleasant_for_ear(wav: &mut Wav, song_file: String) {
+            eprintln!(r#"Coludn't play this song "{song}" because this song doesn't exists in {library}"#, song = song_file, library = FOLDER_WITH_SONGS.split("/").collect::<Vec<&str>>()[1]);
+            println!("Default song was launched!!!");
+            wav.load(Path::new("songs/test_file.mp3")).unwrap()
+        }
+
+        match path_to_file {
+            Some(path) => {
+                match path.exists() {
+                    true => wav.load(path).unwrap(),
+                    false => play_default_song_pleasant_for_ear(&mut wav, song_file)
+                }
+            },
+            None => play_default_song_pleasant_for_ear(&mut wav, song_file)
+        };
     
-
-    // Call play sound
-    sl.play(&wav);
-
-    // Wait for inicjalize play sound and keep not stop play sopng until song end (this is default behaviour of solod)
-    let time_elapser = Instant::now();
-    let _song_time_milis = wav.length() * 1000.0;
-    while sl.voice_count() > 0 {
-        let _time_elapsed = time_elapser.elapsed().as_millis() as f64;
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Call play sound
+        sl.play(&wav);
+    
+        // Wait for inicjalize play sound and keep not stop play sopng until song end (this is default behaviour of solod)
+        let time_elapser = Instant::now();
+        let song_duration_ms = wav.length() * 1000.0;
+        while sl.voice_count() > 0 {
+            let time_elapsed = time_elapser.elapsed().as_millis() as f64;
+    
+            // Stop blocking program I/O loop by surrounded loop by free up space to create new Soloud instance and play new song
+            if SongState::get_state() > 1 /* && time_elapsed >= 1000 as f64 */ {
+                // When demand to play new song has been recived across capture song state change
+                sl.stop_all();
+                SongState::delete_state();
+                break;
+            }
+            else if time_elapsed >= song_duration_ms {
+                // When time expired
+                SongState::delete_state();
+                break;
+            };
+    
+            sleep(std::time::Duration::from_millis(CHECK_SONG_PLAYING_STATE_DELAY_MS));
+        };
     }
-}
+    else {
+        // Recurency here
+        SongState::rcreate_new_state();
+        soloud_play_song(path_to_file, song_file);
+    };
 
+}
 
 struct App;
 impl App {
@@ -54,17 +90,79 @@ impl App {
                 String::new()
             };
 
+            // println!("{}", determine_one_pressed_key);
             // Get Binding object for clicked key and play song from this object or do nothing when None is recived
             let get_stored_binding_or_none = BindingsSuite::check_exists_return_data(determine_one_pressed_key);
             match get_stored_binding_or_none {
                 Some(binding_obj) => {
-                    binding_obj.play_song_for_binding();
+                    // println!("Function to play song called!!!");
+
+                    // Update or expand song play state
+                    SongState::save_update_state();
+
+                    // play song in loop and another thread
+                    spawn(|| {
+                        binding_obj.play_song_for_binding();
+                    });
+                    
+                    // constrain call same song for key by freeze thread for some miliseconds
+                    sleep(Duration::from_millis(500));
                 },
                 None => ()
             };
         };
     }
 }
+
+struct SongState;
+impl SongState {
+    #[allow(dead_code)]
+    fn rcreate_new_state() {
+        // Delete old state
+        Self::delete_state();
+
+        // Create new state file
+        Self::save_update_state();
+    }
+    
+    fn save_update_state() {
+        let st_val = Self::get_state();
+        let new_file_content = st_val + 1;
+        let pf = Path::new(SONG_STATE_FILE);
+        fs::write(pf, new_file_content.to_string()).unwrap();
+
+    }
+
+    fn get_state() -> u8 {
+        let path_to_file = Path::new(SONG_STATE_FILE);
+        let file_content = if path_to_file.exists() {
+            let expr = fs::read_to_string(path_to_file);
+            match expr {
+                Ok(v) => {
+                    let parse_res = v.parse::<u8>();
+                    match parse_res {
+                        Ok(v) => v,
+                        Err(_) => 0
+                    }
+                },
+                Err(_) => 0
+            }
+        }
+        else {
+            0
+        };
+
+        file_content
+    }
+
+    fn delete_state() {
+        let pf = Path::new(SONG_STATE_FILE);
+        
+        if pf.exists() {
+            fs::remove_file(pf).unwrap();
+        }
+    }
+} 
 
 #[derive(Debug, Serialize, Deserialize)]
 struct BindingsSuite {
@@ -147,13 +245,9 @@ impl Binding {
         // Check whether song exists and play it
         let path_to_song = Path::new(FOLDER_WITH_SONGS).join(&song_file);
 
-        if path_to_song.exists() {
-            let path_with_song = path_to_song.as_path();
-            soloud_play_song(Some(path_with_song));
-        }
-        else {
-            eprintln!(r#"Coludn't play this song "{song}" because this song doesn't exists in {library}"#, song = song_file, library = FOLDER_WITH_SONGS.split("/").collect::<Vec<&str>>()[1]);
-        };
+        // Inicjalize source play sound function
+        let path_with_song = path_to_song.as_path();
+        soloud_play_song(Some(path_with_song), song_file);
     }
 }
 
@@ -224,11 +318,11 @@ fn main() {
 
 #[cfg(test)]
 mod test {
-    use crate::{ soloud_play_song, Binding, BindingsSuite };
+    use crate::{ soloud_play_song, Binding, BindingsSuite, SongState };
 
     #[test]
     fn play_song_basic() {
-        soloud_play_song(None)
+        soloud_play_song(None, "./songs/test_file.mp3".to_string())
     }
 
     #[test]
@@ -250,5 +344,10 @@ mod test {
     fn get_specific_binding() {
         let binding = BindingsSuite::check_exists_return_data("test".to_string()).expect("Couldn't get this binding!!!");
         println!("Binding object: {:#?}", binding);
+    }
+
+    #[test]
+    fn music_state_1() {
+        println!("{}", SongState::get_state())
     }
 }
